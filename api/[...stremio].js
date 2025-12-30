@@ -3,8 +3,7 @@ import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
 const CINEMETA_BASE = "https://v3-cinemeta.strem.io";
 const MDBLIST_BASE = "https://mdblist.com/api";
 
-// Basic in-memory cache (per function instance)
-const TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const TTL_MS = 6 * 60 * 60 * 1000;
 const cache = new Map();
 
 function cacheGet(key) {
@@ -24,8 +23,12 @@ async function fetchJson(url) {
   const cached = cacheGet(url);
   if (cached) return cached;
 
+  // `fetch` should exist in Node 18+ on Vercel. If not, this will throw clearly.
   const res = await fetch(url, { headers: { "User-Agent": "stremio-mdblist-addon/1.0" } });
-  if (!res.ok) throw new Error(`Fetch failed ${res.status} for ${url}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Fetch failed ${res.status} for ${url} :: ${text.slice(0, 200)}`);
+  }
   const json = await res.json();
   cacheSet(url, json);
   return json;
@@ -34,28 +37,24 @@ async function fetchJson(url) {
 function formatRatingsBlock(mdblist) {
   const r = mdblist?.ratings ? mdblist.ratings : mdblist;
 
-  const imdb = r?.imdb;
-  const tmdb = r?.tmdb;
-  const trakt = r?.trakt;
-  const tomato = r?.tomato;
-  const metacritic = r?.metacritic;
-  const letterboxd = r?.letterboxd;
+  const fields = [
+    ["IMDb", r?.imdb],
+    ["TMDb", r?.tmdb],
+    ["Trakt", r?.trakt],
+    ["Letterboxd", r?.letterboxd],
+    ["Rotten Tomatoes", r?.tomato != null ? (String(r.tomato).includes("%") ? r.tomato : `${r.tomato}%`) : null],
+    ["Metacritic", r?.metacritic]
+  ];
 
-  const lines = [];
-  if (imdb != null) lines.push(`IMDb: ${imdb}`);
-  if (tmdb != null) lines.push(`TMDb: ${tmdb}`);
-  if (trakt != null) lines.push(`Trakt: ${trakt}`);
-  if (letterboxd != null) lines.push(`Letterboxd: ${letterboxd}`);
-  if (tomato != null) lines.push(`Rotten Tomatoes: ${String(tomato).includes("%") ? tomato : `${tomato}%`}`);
-  if (metacritic != null) lines.push(`Metacritic: ${metacritic}`);
-
+  const lines = fields.filter(([, v]) => v != null).map(([k, v]) => `${k}: ${v}`);
   if (!lines.length) return null;
+
   return `Ratings\n${lines.join("\n")}`;
 }
 
 const manifest = {
   id: "org.joshuawlambert.mdblist.ratings.description",
-  version: "1.0.1",
+  version: "1.0.2",
   name: "MDBList Ratings (Description)",
   description: "Adds MDBList ratings into the summary description for movies and series.",
   resources: ["meta"],
@@ -67,16 +66,14 @@ const manifest = {
 const builder = new addonBuilder(manifest);
 
 builder.defineMetaHandler(async ({ type, id }) => {
-  // Always start from Cinemeta
   const cinemetaUrl = `${CINEMETA_BASE}/meta/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
   const cinemeta = await fetchJson(cinemetaUrl);
   const meta = cinemeta?.meta;
   if (!meta) return { meta };
 
   const apiKey = process.env.MDBLIST_API_KEY;
-  if (!apiKey) return { meta }; // no key = no augmentation, but do not crash
+  if (!apiKey) return { meta };
 
-  // MDBList by IMDb id
   const mdblistUrl = `${MDBLIST_BASE}/?apikey=${encodeURIComponent(apiKey)}&i=${encodeURIComponent(id)}`;
 
   try {
@@ -87,18 +84,60 @@ builder.defineMetaHandler(async ({ type, id }) => {
       meta.description = `${block}\n\n${original}`.trim();
     }
   } catch {
-    // If MDBList fails, still return Cinemeta meta
+    // keep Cinemeta meta even if MDBList fails
   }
 
   return { meta };
 });
 
+const stremioInterface = builder.getInterface();
+
 export default async function handler(req, res) {
   try {
-    await serveHTTP(builder.getInterface(), { req, res });
+    const url = new URL(req.url, "https://example.org");
+    const path = url.pathname;
+
+    // Health check
+    if (path === "/api/ping") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    // Debug endpoint
+    if (path === "/api/debug") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify(
+          {
+            node: process.version,
+            hasFetch: typeof fetch === "function",
+            hasApiKey: Boolean(process.env.MDBLIST_API_KEY),
+            exampleManifestUrl: "/api/manifest.json",
+            exampleMetaUrl: "/api/meta/movie/tt0111161.json"
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+
+    await serveHTTP(stremioInterface, { req, res });
   } catch (e) {
     res.statusCode = 500;
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ error: e?.message || String(e) }));
+    res.end(
+      JSON.stringify(
+        {
+          error: e?.message || String(e),
+          stack: e?.stack || null
+        },
+        null,
+        2
+      )
+    );
   }
 }
