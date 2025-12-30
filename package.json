@@ -1,8 +1,7 @@
 {
-  "name": "stremio-mdblist-ratings-description",
+  "name": "addon",
   "version": "1.0.0",
   "type": "module",
-  "license": "MIT",
   "dependencies": {
     "stremio-addon-sdk": "^1.6.10"
   }
