@@ -99,6 +99,14 @@ const stremioInterface = builder.getInterface();
 
 export default async function handler(req, res) {
   try {
+    // Vercel mounts this function under /api, but Stremio SDK expects root paths.
+    // Example: /api/manifest.json -> /manifest.json
+    if (typeof req.url === "string" && req.url.startsWith("/api/")) {
+      req.url = req.url.replace(/^\/api/, "");
+    } else if (req.url === "/api") {
+      req.url = "/";
+    }
+
     await serveHTTP(stremioInterface, { req, res });
   } catch (e) {
     res.statusCode = 500;
